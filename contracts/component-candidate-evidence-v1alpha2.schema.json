@@ -1,0 +1,644 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.movie-platform.dev/ci/component-candidate-evidence-v1alpha2.schema.json",
+  "title": "ComponentCandidateEvidence v1alpha2",
+  "description": "Closed runnable-container profiles; legacy reservation-service v1alpha1 and static web artifacts are not accepted.",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "ci.movie-platform.dev/v1alpha2",
+      "description": "Version of this producer contract."
+    },
+    "kind": {
+      "type": "string",
+      "const": "ComponentCandidateEvidence",
+      "description": "Discriminator for candidate evidence documents."
+    },
+    "component": {
+      "type": "string",
+      "description": "Platform component that produced the candidate.",
+      "maxLength": 256,
+      "minLength": 1,
+      "enum": [
+        "reservation-agent",
+        "recommendation-service",
+        "reservation-mcp",
+        "recommendation-mcp",
+        "reservation-web"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "description": "Canonical GitHub source repository.",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "description": "Full Git commit object ID built by the workflow."
+        },
+        "ref": {
+          "type": "string",
+          "const": "refs/heads/main",
+          "description": "Canonical source ref allowed to publish candidates."
+        }
+      },
+      "required": ["repository", "revision", "ref"],
+      "additionalProperties": false,
+      "description": "Immutable source identity for the candidate build."
+    },
+    "workflow": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "const": ".github/workflows/ci.yml",
+          "description": "Canonical workflow path."
+        },
+        "job": {
+          "type": "string",
+          "description": "Canonical candidate-producing job.",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "description": "GitHub Actions workflow run ID."
+        },
+        "runAttempt": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "One-based attempt number for the workflow run."
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "format": "uri",
+          "description": "URL for the exact GitHub Actions run attempt."
+        }
+      },
+      "required": ["path", "job", "runId", "runAttempt", "url"],
+      "additionalProperties": false,
+      "description": "Canonical workflow execution that produced the candidate."
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "description": "Canonical GHCR repository.",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Immutable OCI manifest digest selected for deployment."
+        },
+        "platform": {
+          "type": "object",
+          "properties": {
+            "os": {
+              "type": "string",
+              "const": "linux"
+            },
+            "architecture": {
+              "type": "string",
+              "const": "amd64"
+            }
+          },
+          "required": ["os", "architecture"],
+          "additionalProperties": false,
+          "description": "Single deployable platform represented by the candidate digest."
+        }
+      },
+      "required": ["repository", "digest", "platform"],
+      "additionalProperties": false,
+      "description": "Immutable container candidate identity."
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "subjectName": {
+          "type": "string",
+          "description": "OCI subject name asserted by the provenance.",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "subjectDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "OCI subject digest asserted by the provenance."
+        },
+        "predicateType": {
+          "type": "string",
+          "const": "https://slsa.dev/provenance/v1",
+          "description": "Expected provenance predicate type."
+        },
+        "attestationId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "description": "GitHub artifact attestation ID."
+        },
+        "attestationUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "format": "uri",
+          "description": "GitHub navigation URL for the declared attestation ID."
+        },
+        "bundle": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Fixed path inside the downloaded security-evidence artifact.",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "SHA-256 digest of the file bytes at path."
+            },
+            "format": {
+              "type": "string",
+              "const": "sigstore-bundle-json",
+              "description": "Serialized Sigstore bundle JSON."
+            }
+          },
+          "required": ["path", "sha256", "format"],
+          "additionalProperties": false,
+          "description": "Content-addressed Sigstore bundle returned by the provenance action."
+        }
+      },
+      "required": [
+        "subjectName",
+        "subjectDigest",
+        "predicateType",
+        "attestationId",
+        "attestationUrl",
+        "bundle"
+      ],
+      "additionalProperties": false,
+      "description": "Cryptographically verifiable provenance identity and retained bundle."
+    },
+    "securityEvidence": {
+      "type": "object",
+      "properties": {
+        "artifactName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Workflow artifact containing all declared evidence files."
+        },
+        "sbom": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Fixed path inside the downloaded security-evidence artifact.",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "SHA-256 digest of the file bytes at path."
+            },
+            "format": {
+              "type": "string",
+              "const": "cyclonedx-json",
+              "description": "CycloneDX JSON document."
+            }
+          },
+          "required": ["path", "sha256", "format"],
+          "additionalProperties": false,
+          "description": "Content-addressed CycloneDX software bill of materials."
+        },
+        "vulnerabilities": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Fixed path inside the downloaded security-evidence artifact.",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "description": "SHA-256 digest of the file bytes at path."
+            },
+            "format": {
+              "type": "string",
+              "const": "trivy-json",
+              "description": "Trivy JSON vulnerability report."
+            },
+            "subject": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "description": "Digest-pinned OCI subject scanned by Trivy."
+            },
+            "counts": {
+              "type": "object",
+              "properties": {
+                "unknown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "low": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "medium": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "high": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "critical": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": ["unknown", "low", "medium", "high", "critical"],
+              "additionalProperties": false,
+              "description": "Finding counts by normalized severity."
+            }
+          },
+          "required": ["path", "sha256", "format", "subject", "counts"],
+          "additionalProperties": false,
+          "description": "Content-addressed Trivy vulnerability report for the immutable candidate."
+        }
+      },
+      "required": ["artifactName", "sbom", "vulnerabilities"],
+      "additionalProperties": false,
+      "description": "Content-addressed security evidence emitted by the canonical workflow."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+      "description": "RFC 3339 time when this evidence document was emitted."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "component",
+    "source",
+    "workflow",
+    "candidate",
+    "provenance",
+    "securityEvidence",
+    "generatedAt"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "reservation-agent"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "repository": {
+                "const": "movie-reservation-platform-lab/movie-reservation-agent"
+              }
+            }
+          },
+          "candidate": {
+            "properties": {
+              "repository": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-reservation-agent"
+              }
+            }
+          },
+          "workflow": {
+            "properties": {
+              "job": {
+                "const": "publish immutable GHCR image"
+              }
+            }
+          },
+          "provenance": {
+            "properties": {
+              "subjectName": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-reservation-agent"
+              },
+              "bundle": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-agent-provenance.json"
+                  }
+                }
+              }
+            }
+          },
+          "securityEvidence": {
+            "properties": {
+              "sbom": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-agent.cdx.json"
+                  }
+                }
+              },
+              "vulnerabilities": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-agent-vulnerabilities.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "recommendation-service"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "repository": {
+                "const": "movie-reservation-platform-lab/movie-recommendation-service"
+              }
+            }
+          },
+          "candidate": {
+            "properties": {
+              "repository": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-recommendation-service"
+              }
+            }
+          },
+          "workflow": {
+            "properties": {
+              "job": {
+                "const": "publish immutable GHCR image"
+              }
+            }
+          },
+          "provenance": {
+            "properties": {
+              "subjectName": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-recommendation-service"
+              },
+              "bundle": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/recommendation-service-provenance.json"
+                  }
+                }
+              }
+            }
+          },
+          "securityEvidence": {
+            "properties": {
+              "sbom": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/recommendation-service.cdx.json"
+                  }
+                }
+              },
+              "vulnerabilities": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/recommendation-service-vulnerabilities.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "reservation-mcp"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "repository": {
+                "const": "movie-reservation-platform-lab/movie-reservation-mcp"
+              }
+            }
+          },
+          "candidate": {
+            "properties": {
+              "repository": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-reservation-mcp"
+              }
+            }
+          },
+          "workflow": {
+            "properties": {
+              "job": {
+                "const": "publish immutable GHCR image"
+              }
+            }
+          },
+          "provenance": {
+            "properties": {
+              "subjectName": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-reservation-mcp"
+              },
+              "bundle": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-mcp-provenance.json"
+                  }
+                }
+              }
+            }
+          },
+          "securityEvidence": {
+            "properties": {
+              "sbom": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-mcp.cdx.json"
+                  }
+                }
+              },
+              "vulnerabilities": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-mcp-vulnerabilities.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "recommendation-mcp"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "repository": {
+                "const": "movie-reservation-platform-lab/movie-recommendation-mcp"
+              }
+            }
+          },
+          "candidate": {
+            "properties": {
+              "repository": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-recommendation-mcp"
+              }
+            }
+          },
+          "workflow": {
+            "properties": {
+              "job": {
+                "const": "publish immutable GHCR image"
+              }
+            }
+          },
+          "provenance": {
+            "properties": {
+              "subjectName": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-recommendation-mcp"
+              },
+              "bundle": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/recommendation-mcp-provenance.json"
+                  }
+                }
+              }
+            }
+          },
+          "securityEvidence": {
+            "properties": {
+              "sbom": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/recommendation-mcp.cdx.json"
+                  }
+                }
+              },
+              "vulnerabilities": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/recommendation-mcp-vulnerabilities.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "reservation-web"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "repository": {
+                "const": "movie-reservation-platform-lab/movie-reservation-web"
+              }
+            }
+          },
+          "candidate": {
+            "properties": {
+              "repository": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-reservation-web"
+              }
+            }
+          },
+          "workflow": {
+            "properties": {
+              "job": {
+                "const": "publish temporary ECS image"
+              }
+            }
+          },
+          "provenance": {
+            "properties": {
+              "subjectName": {
+                "const": "ghcr.io/movie-reservation-platform-lab/movie-reservation-web"
+              },
+              "bundle": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-web-provenance.json"
+                  }
+                }
+              }
+            }
+          },
+          "securityEvidence": {
+            "properties": {
+              "sbom": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-web.cdx.json"
+                  }
+                }
+              },
+              "vulnerabilities": {
+                "properties": {
+                  "path": {
+                    "const": "security-evidence/reservation-web-vulnerabilities.json"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

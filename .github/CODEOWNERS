@@ -1,0 +1,8 @@
+# Shared supply-chain implementation requires organization maintainer review.
+/actions/ @patex1987
+/contracts/ @patex1987
+/test/ @patex1987
+/.github/workflows/ @patex1987
+/package.json @patex1987
+/package-lock.json @patex1987
+/.github/CODEOWNERS @patex1987

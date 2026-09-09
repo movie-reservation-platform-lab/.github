@@ -1,0 +1,119 @@
+name: Attest and record container evidence
+description: Produce a signed, subject-bound v1alpha2 container evidence package without AWS authority.
+inputs:
+  component:
+    description: Reviewed runnable container component.
+    required: true
+  digest:
+    description: Exact single-platform linux/amd64 manifest digest from the build output.
+    required: true
+  github-token:
+    description: Caller GitHub token for provenance verification and attestations; never retained.
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: context
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        CANDIDATE_DIGEST: ${{ inputs.digest }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/lib/context.mjs"
+    - id: provenance
+      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      with:
+        subject-name: ${{ steps.context.outputs.image_ref }}
+        subject-digest: ${{ inputs.digest }}
+        github-token: ${{ inputs.github-token }}
+        push-to-registry: false
+    - id: verified
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        CANDIDATE_DIGEST: ${{ inputs.digest }}
+        PROVENANCE_BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/lib/verify.mjs"
+    - name: CycloneDX SBOM of exact published digest
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type: image
+        image-ref: ${{ steps.verified.outputs.image }}
+        scanners: vuln
+        vuln-type: os,library
+        format: cyclonedx
+        output: ${{ github.workspace }}/security-evidence/${{ inputs.component }}.cdx.json
+        list-all-pkgs: true
+        ignore-unfixed: false
+        hide-progress: true
+        exit-code: "0"
+        timeout: 5m
+        version: v0.70.0
+        cache: false
+    - name: Complete vulnerability report of exact published digest
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type: image
+        image-ref: ${{ steps.verified.outputs.image }}
+        scanners: vuln
+        vuln-type: os,library
+        format: json
+        output: ${{ github.workspace }}/security-evidence/${{ inputs.component }}-vulnerabilities.json
+        severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+        ignore-unfixed: false
+        hide-progress: true
+        exit-code: "0"
+        timeout: 5m
+        skip-setup-trivy: true
+        cache: false
+    - name: Enforce provisional CRITICAL gate
+      shell: bash
+      env:
+        REPORT_PATH: security-evidence/${{ inputs.component }}-vulnerabilities.json
+        EXPECTED_IMAGE: ${{ steps.verified.outputs.image }}
+        SUBJECT_KIND: immutable-ghcr
+        EVIDENCE_ARTIFACT_NAME: ${{ steps.context.outputs.artifact }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/lib/evaluate.mjs"
+    - name: Emit hashed candidate contract
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        CANDIDATE_DIGEST: ${{ inputs.digest }}
+        CANDIDATE_REPOSITORY: ${{ steps.context.outputs.image_ref }}
+        ATTESTATION_ID: ${{ steps.provenance.outputs.attestation-id }}
+        ATTESTATION_URL: ${{ steps.provenance.outputs.attestation-url }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/lib/emit.mjs"
+    - name: Attest the exact four-file handoff
+      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      with:
+        github-token: ${{ inputs.github-token }}
+        subject-path: |
+          ${{ github.workspace }}/security-evidence/component-candidate-evidence-v1alpha2.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}-provenance.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}.cdx.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}-vulnerabilities.json
+    - name: Upload admissible candidate evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.context.outputs.artifact }}
+        path: |
+          ${{ github.workspace }}/security-evidence/component-candidate-evidence-v1alpha2.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}-provenance.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}.cdx.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}-vulnerabilities.json
+        if-no-files-found: error
+        retention-days: 14
+    - name: Upload rejected diagnostics only
+      if: ${{ failure() && !cancelled() && steps.verified.outcome == 'success' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.component }}-rejected-security-evidence-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+        path: |
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}.cdx.json
+          ${{ github.workspace }}/security-evidence/${{ inputs.component }}-vulnerabilities.json
+        if-no-files-found: warn
+        retention-days: 14

@@ -1,0 +1,22 @@
+name: Prepare container candidate
+description: Validate canonical publication and derive attempt-unique discovery metadata.
+inputs:
+  component:
+    description: Reviewed runnable container component (reservation-service pilot is separate).
+    required: true
+outputs:
+  image_ref:
+    description: Canonical GHCR image repository.
+    value: ${{ steps.prepare.outputs.image_ref }}
+  tag:
+    description: Attempt-unique discovery tag; not admission identity.
+    value: ${{ steps.prepare.outputs.tag }}
+runs:
+  using: composite
+  steps:
+    - id: prepare
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/../container-evidence/lib/prepare.mjs"
