@@ -162,6 +162,158 @@ archive cannot simply be relabeled as a Security Lake custom source.
 See [Security Lake pricing](https://aws.amazon.com/security-lake/pricing/) and
 [custom-source requirements](https://docs.aws.amazon.com/security-lake/latest/userguide/custom-sources.html).
 
+### Proposed Security Lake migration: components and durability
+
+This is a proposed architecture, not an implemented or approved migration.
+**Security Lake is the destination; durable delivery must be designed before
+events reach it.** For an initial durability-focused implementation, an outbox,
+background relay, and batch publisher avoid introducing a streaming platform
+without a demonstrated need.
+
+```mermaid
+flowchart TD
+    USER["User request"] --> APP["NestJS application<br/>Authentication or business operation"]
+    APP --> SDK["Audit library<br/>Create and validate event"]
+
+    subgraph DB["Durable application database"]
+        TX["Database transaction"]
+        BUSINESS["Business changes<br/>when applicable"]
+        OUTBOX["Audit outbox table<br/>Events awaiting delivery"]
+        TX --> BUSINESS
+        TX --> OUTBOX
+    end
+
+    APP --> TX
+    SDK --> TX
+    OUTBOX --> RELAY["Background relay<br/>Retry until safely stored"]
+
+    subgraph AUDIT["Security / audit account"]
+        RAW["S3 staging archive<br/>Durable events for replay"]
+        PUB["Security Lake publisher<br/>Validate OCSF, batch, convert to Parquet"]
+        BAD["Restricted quarantine<br/>Invalid events and alert"]
+        LAKE["Security Lake custom source<br/>Parquet objects in S3"]
+        CATALOG["Glue catalog and Lake Formation<br/>Tables and access permissions"]
+        ATHENA["Athena<br/>SQL audit queries"]
+
+        RAW --> PUB
+        PUB -->|Valid events| LAKE
+        PUB -->|Invalid events| BAD
+        LAKE --> CATALOG --> ATHENA
+    end
+
+    RELAY -->|Acknowledged S3 write| RAW
+    APP -.-> OPS["Separate operational logs and traces<br/>Fluent Bit / CloudWatch / ADOT / X-Ray"]
+```
+
+The arrows inside the database describe one atomic transaction, not independent
+writes. The two-account layout is a proposed isolation boundary, not a statement
+about the current demo. These boxes are responsibilities, not a requirement for
+one separately deployed service per box.
+
+#### What each component does
+
+| Component | Responsibility |
+| --- | --- |
+| Application emission points | Decide what actually happened: login rejected, reservation confirmed, permission changed. Emit where the outcome is known, not merely when HTTP returns 200. |
+| Audit library | Construct a versioned event with a stable event ID, actor, action, target, outcome, timestamp, and correlation IDs. Exclude passwords, tokens, and unnecessary personal data. |
+| Database outbox | Persist an audit event before acknowledging the audited operation; a durable outgoing mailbox. |
+| Background relay | Read committed events, deliver them to S3, and retry after failures or restarts. |
+| S3 staging archive | Preserve accepted events for repair and replay without requiring the application to emit them again. Apply explicit access and retention policies. |
+| Security Lake publisher | Map and validate the agreed OCSF schema, create partitioned Parquet batches, and checkpoint publication. |
+| Security Lake, catalog, and Athena | Organize the dataset, govern access, and provide SQL investigation over stored events. |
+
+For custom sources, the publisher must supply OCSF-formatted Parquet; Security
+Lake does not automatically convert our application JSON. Different OCSF event
+classes require separate custom sources. Authentication is one class; reservation
+and administrative activity need deliberate mappings rather than being labelled
+as authentication. Follow the supported schema versions, partitioning, sorting,
+and batch requirements in the
+[custom-source documentation](https://docs.aws.amazon.com/security-lake/latest/userguide/custom-sources.html).
+
+Keep the library's business-facing API independent of S3, Parquet, and AWS
+permissions. NestJS middleware can capture request context; the authentication
+decision or application use case supplies the event's meaning. The durable
+adapter must participate in the caller's database transaction. It must not reuse
+the existing stdout sink's local-acceptance receipt as a durability guarantee.
+
+#### Database changes and authentication decisions
+
+For an audited business mutation, commit the change and its audit event together:
+
+```text
+BEGIN TRANSACTION
+  Save the confirmed reservation
+  Insert "reservation confirmed" into audit_outbox
+COMMIT
+```
+
+Both succeed, or neither succeeds. If the process crashes after commit, the
+outbox event remains available for the relay. This closes the failure window
+between committing a business change and separately emitting its audit event.
+It is the
+[transactional outbox pattern](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html),
+not a guarantee that downstream delivery is instantaneous or duplicate-free.
+
+Handle the other cases explicitly:
+
+- **Rejected login or failed operation:** record the failure in its own audit
+  transaction. An event inside a rolled-back business transaction disappears too.
+- **Successful login:** persist the audit event before issuing a successful
+  response/session. Specify what happens if persistence is unavailable; for
+  audit-critical actions, reject or defer the action rather than silently losing
+  evidence. A failed login must never become successful because auditing failed.
+- **Direct database access:** application events cannot capture an administrator
+  running SQL outside the application. Database-native auditing is a separate
+  source to collect and normalize. Row-change capture alone does not explain
+  human intent or capture every read.
+
+#### Durability rules and acceptance boundaries
+
+**Do not discard the previous durable copy before the next durable destination
+acknowledges receipt.** Database commit, archive acceptance, and lake queryability
+are three different milestones.
+
+1. Store the outbox in a database that survives ECS task deletion, not solely in
+   container-local storage. Define availability, backups, restore testing, and
+   acceptable recovery-point objectives.
+2. Mark relay delivery complete only after successful S3 storage. Checkpoint
+   publication only after successful output writes. Use stable object/batch
+   identities so a crash between a write and its checkpoint can be retried safely.
+3. Preserve event IDs across retries. Expect at-least-once processing and make
+   consumers idempotent. Deduplicate by event ID, never by trace ID.
+4. Retain staging data long enough to recover from publisher outages. Define
+   outbox cleanup, archive retention, and capacity limits; do not silently expire
+   pending events when a backlog grows.
+5. Monitor oldest undelivered event, backlog, failures, quarantine, and missing
+   publication batches. Reconcile produced, accepted, and published event IDs.
+   A quarantine is an actionable recovery path, not successful publication;
+   never copy credentials into it for debugging.
+6. Separate writer, reader, and administrator permissions. If immutable retention
+   is required, design a protected archive explicitly. Durability against crashes
+   and resistance to deliberate deletion are different requirements.
+
+The intended result is **at-least-once delivery with deduplication and recovery**,
+not an end-to-end exactly-once claim. Test crashes before and after each handoff,
+duplicate deliveries, extended outages, invalid schemas, replay, and restoration.
+
+#### Migration from Fluent Bit and Firehose
+
+The smallest compatibility pilot keeps the existing
+`stdout -> Fluent Bit -> Firehose -> S3` path and adds the Security Lake publisher
+after S3. It changes the destination but does not fix losses before S3 acceptance.
+
+In the durability-focused design above, Fluent Bit remains useful for ordinary
+operational logs. Firehose is optional because the relay and publisher cover
+delivery and batching. The outbox supplies the initial persistent buffer; add
+SQS or Kinesis only when scale, isolation, replay, or additional consumers justify
+another component.
+
+Keep implementation slices separate: first validate Security Lake publication
+using sanitized fixtures or existing archived events, then implement and
+failure-test the durable producer/outbox path. Do not describe the migration as
+durable until that path is verified. Both slices remain subject to the workload
+and cost evaluation below.
+
 ### Search layer
 
 Compare [CloudWatch](https://aws.amazon.com/cloudwatch/pricing/),
