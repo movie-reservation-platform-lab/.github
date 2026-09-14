@@ -166,49 +166,102 @@ See [Security Lake pricing](https://aws.amazon.com/security-lake/pricing/) and
 
 This is a proposed architecture, not an implemented or approved migration.
 **Security Lake is the destination; durable delivery must be designed before
-events reach it.** For an initial durability-focused implementation, an outbox,
-background relay, and batch publisher avoid introducing a streaming platform
-without a demonstrated need.
+events reach it.** Distinguish standalone authentication decisions from events
+that must commit atomically with a business database mutation. The following two
+designs reuse Firehose and share a staging archive and publisher implementation;
+they do not have identical durability guarantees.
+
+#### Authentication event without a business database mutation
+
+Example: credentials are evaluated and an authentication rejection is recorded.
+There is no reservation change to commit alongside it.
 
 ```mermaid
 flowchart TD
-    USER["User request"] --> APP["NestJS application<br/>Authentication or business operation"]
-    APP --> SDK["Audit library<br/>Create and validate event"]
+    REQUEST["Login request"] --> AUTH["NestJS authentication handler<br/>Evaluate credentials"]
+    AUTH --> EVENT["Audit library<br/>Build authentication event"]
+    EVENT --> SEND["AWS SDK adapter in the app<br/>Send event and await acknowledgement"]
+    SEND --> FIREHOSE["Amazon Data Firehose<br/>Buffer, batch and deliver"]
+    SEND --> POLICY["Response policy<br/>Do not grant login if required audit acceptance fails"]
+    FIREHOSE --> STAGING["Amazon S3 bucket<br/>Staging archive: JSON events"]
+    STAGING --> PUBLISHER["Scheduled ECS Fargate task<br/>Python + PyArrow<br/>Validate OCSF and produce Parquet"]
+    PUBLISHER --> LAKE["Security Lake custom source<br/>S3 Parquet dataset"]
+    LAKE --> QUERY["Glue catalog + Lake Formation<br/>Athena SQL queries"]
+```
 
-    subgraph DB["Durable application database"]
-        TX["Database transaction"]
-        BUSINESS["Business changes<br/>when applicable"]
-        OUTBOX["Audit outbox table<br/>Events awaiting delivery"]
-        TX --> BUSINESS
+The application explicitly awaits Firehose acceptance. Stdout collection through
+Fluent Bit cannot provide that remote acknowledgement to the application.
+However, Firehose acceptance is **not** proof of permanent archival: buffering
+and retries are bounded, and delivery failures require monitoring and recovery.
+See [Firehose delivery troubleshooting](https://docs.aws.amazon.com/firehose/latest/dev/troubleshooting.html).
+
+A crash before submission can still lose the authentication decision. If every
+accepted authentication attempt must be recoverable, persist an attempt record
+before evaluation and then its outcome in a dedicated audit journal, with retry
+delivery. That can use database storage even though there is no business
+mutation. The direct-delivery variant alone does not meet that stronger
+requirement. An acknowledged decision is also not proof that a session was
+subsequently issued; model those as separate facts when needed.
+
+#### Database mutation with a transactional outbox
+
+Example: confirming a reservation. The business change must not commit without
+its audit event.
+
+```mermaid
+flowchart TD
+    REQUEST["Reservation request"] --> APP["NestJS reservation use case"]
+
+    subgraph DB["Amazon RDS for PostgreSQL"]
+        TX["ONE database transaction<br/>Update reservation + insert audit event"]
+        OUTBOX["audit_outbox table<br/>Committed events awaiting delivery"]
         TX --> OUTBOX
     end
 
     APP --> TX
-    SDK --> TX
-    OUTBOX --> RELAY["Background relay<br/>Retry until safely stored"]
-
-    subgraph AUDIT["Security / audit account"]
-        RAW["S3 staging archive<br/>Durable events for replay"]
-        PUB["Security Lake publisher<br/>Validate OCSF, batch, convert to Parquet"]
-        BAD["Restricted quarantine<br/>Invalid events and alert"]
-        LAKE["Security Lake custom source<br/>Parquet objects in S3"]
-        CATALOG["Glue catalog and Lake Formation<br/>Tables and access permissions"]
-        ATHENA["Athena<br/>SQL audit queries"]
-
-        RAW --> PUB
-        PUB -->|Valid events| LAKE
-        PUB -->|Invalid events| BAD
-        LAKE --> CATALOG --> ATHENA
-    end
-
-    RELAY -->|Acknowledged S3 write| RAW
-    APP -.-> OPS["Separate operational logs and traces<br/>Fluent Bit / CloudWatch / ADOT / X-Ray"]
+    TX --> RESPONSE["Return success only after commit"]
+    OUTBOX --> RELAY["Outbox relay: ECS Fargate worker<br/>TypeScript + PostgreSQL client + AWS SDK"]
+    RELAY --> FIREHOSE["Amazon Data Firehose<br/>Buffer, batch and deliver"]
+    FIREHOSE --> STAGING["Amazon S3 bucket<br/>Staging archive: JSON events"]
+    STAGING --> PUBLISHER["Scheduled ECS Fargate task<br/>Python + PyArrow<br/>Validate OCSF and produce Parquet"]
+    PUBLISHER --> LAKE["Security Lake custom source<br/>S3 Parquet dataset"]
+    LAKE --> QUERY["Glue catalog + Lake Formation<br/>Athena SQL queries"]
 ```
 
 The arrows inside the database describe one atomic transaction, not independent
-writes. The two-account layout is a proposed isolation boundary, not a statement
-about the current demo. These boxes are responsibilities, not a requirement for
-one separately deployed service per box.
+writes. Database commit is the first durable boundary. If the application
+crashes afterward, the event remains in the outbox. Firehose acceptance and S3
+archival must be tracked as separate delivery states; keep the outbox recoverable
+until archival is confirmed before cleanup. Confirmation requires an explicit
+reconciliation mechanism using archived event IDs, not just a successful
+Firehose API response.
+
+Account boundaries are omitted for readability. A separate security/audit
+account is a proposed isolation measure, not a claim about the current demo.
+Operational logs and traces remain on their separate Fluent Bit / CloudWatch /
+ADOT / X-Ray path in both designs.
+
+#### Concrete implementation choices
+
+| Responsibility | Initial implementation | Custom work required |
+| --- | --- | --- |
+| Outbox relay | TypeScript worker on ECS Fargate, using a PostgreSQL client and AWS SDK; scheduled Lambda is an alternative | Claim committed rows, send events, handle partial failures, retry, and track acceptance and archival separately |
+| S3 staging archive | Amazon S3 bucket populated by Amazon Data Firehose | Configure permissions, encryption, retention, delivery monitoring, and replay access |
+| Security Lake publisher | Python task on ECS Fargate using PyArrow, launched by EventBridge Scheduler | OCSF validation, batching, partitioning, Parquet generation, uploads, publication checkpoints, and restricted quarantine |
+
+These are implementation candidates, not provisioned resources. PyArrow supplies
+[Parquet writing](https://arrow.apache.org/docs/python/parquet.html), not OCSF
+business mappings or the recovery workflow. The publisher should collect
+unpublished staging inputs into appropriately sized batches, rather than create
+a lake file for each individual event. Persist its input/output checkpoints and
+handle late inputs and overlapping runs safely.
+
+An existing CDC implementation is another relay option:
+[Debezium's outbox event router](https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html)
+captures outbox changes, while
+[AWS DMS can deliver change records to Kinesis](https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Target.Kinesis.html).
+Neither removes the need for OCSF publication and recovery design. Evaluate their
+operational and cost overhead before replacing a small polling worker.
 
 #### What each component does
 
@@ -217,7 +270,7 @@ one separately deployed service per box.
 | Application emission points | Decide what actually happened: login rejected, reservation confirmed, permission changed. Emit where the outcome is known, not merely when HTTP returns 200. |
 | Audit library | Construct a versioned event with a stable event ID, actor, action, target, outcome, timestamp, and correlation IDs. Exclude passwords, tokens, and unnecessary personal data. |
 | Database outbox | Persist an audit event before acknowledging the audited operation; a durable outgoing mailbox. |
-| Background relay | Read committed events, deliver them to S3, and retry after failures or restarts. |
+| Background relay | Read committed events, submit them to Firehose, retry after failures or restarts, and track downstream archival separately. |
 | S3 staging archive | Preserve accepted events for repair and replay without requiring the application to emit them again. Apply explicit access and retention policies. |
 | Security Lake publisher | Map and validate the agreed OCSF schema, create partitioned Parquet batches, and checkpoint publication. |
 | Security Lake, catalog, and Athena | Organize the dataset, govern access, and provide SQL investigation over stored events. |
@@ -232,8 +285,9 @@ and batch requirements in the
 
 Keep the library's business-facing API independent of S3, Parquet, and AWS
 permissions. NestJS middleware can capture request context; the authentication
-decision or application use case supplies the event's meaning. The durable
-adapter must participate in the caller's database transaction. It must not reuse
+decision or application use case supplies the event's meaning. For database
+mutations, the outbox adapter must participate in the caller's transaction. Neither
+the direct-delivery nor the outbox adapter may reuse
 the existing stdout sink's local-acceptance receipt as a durability guarantee.
 
 #### Database changes and authentication decisions
@@ -256,12 +310,14 @@ not a guarantee that downstream delivery is instantaneous or duplicate-free.
 
 Handle the other cases explicitly:
 
-- **Rejected login or failed operation:** record the failure in its own audit
-  transaction. An event inside a rolled-back business transaction disappears too.
-- **Successful login:** persist the audit event before issuing a successful
-  response/session. Specify what happens if persistence is unavailable; for
-  audit-critical actions, reject or defer the action rather than silently losing
-  evidence. A failed login must never become successful because auditing failed.
+- **Rejected login or failed operation:** use the standalone delivery path, or
+  a dedicated audit transaction when stronger durability is required. An event
+  inside a rolled-back business transaction disappears too.
+- **Successful login:** require the selected acceptance boundary before issuing
+  a successful response/session. Firehose acceptance and database journal
+  persistence offer different guarantees. Specify what happens if acceptance is
+  unavailable; for audit-critical actions, reject or defer the action. A failed
+  login must never become successful because auditing failed.
 - **Direct database access:** application events cannot capture an administrator
   running SQL outside the application. Database-native auditing is a separate
   source to collect and normalize. Row-change capture alone does not explain
@@ -270,13 +326,16 @@ Handle the other cases explicitly:
 #### Durability rules and acceptance boundaries
 
 **Do not discard the previous durable copy before the next durable destination
-acknowledges receipt.** Database commit, archive acceptance, and lake queryability
-are three different milestones.
+acknowledges receipt.** Database commit, Firehose acceptance, S3 archival, and
+lake queryability are different milestones. The direct authentication variant
+has no initial database copy; its limitations must not be presented as outbox
+guarantees.
 
 1. Store the outbox in a database that survives ECS task deletion, not solely in
    container-local storage. Define availability, backups, restore testing, and
    acceptable recovery-point objectives.
-2. Mark relay delivery complete only after successful S3 storage. Checkpoint
+2. Track Firehose acceptance separately from confirmed S3 archival, and do not
+   delete the last outbox copy based only on Firehose acceptance. Checkpoint
    publication only after successful output writes. Use stable object/batch
    identities so a crash between a write and its checkpoint can be retried safely.
 3. Preserve event IDs across retries. Expect at-least-once processing and make
@@ -292,8 +351,10 @@ are three different milestones.
    is required, design a protected archive explicitly. Durability against crashes
    and resistance to deliberate deletion are different requirements.
 
-The intended result is **at-least-once delivery with deduplication and recovery**,
-not an end-to-end exactly-once claim. Test crashes before and after each handoff,
+For durably recorded events, the intended result is **at-least-once delivery with
+deduplication and recovery**, not an end-to-end exactly-once claim. Direct
+authentication delivery does not cover a crash before submission. Test crashes
+before and after each handoff,
 duplicate deliveries, extended outages, invalid schemas, replay, and restoration.
 
 #### Migration from Fluent Bit and Firehose
@@ -302,11 +363,12 @@ The smallest compatibility pilot keeps the existing
 `stdout -> Fluent Bit -> Firehose -> S3` path and adds the Security Lake publisher
 after S3. It changes the destination but does not fix losses before S3 acceptance.
 
-In the durability-focused design above, Fluent Bit remains useful for ordinary
-operational logs. Firehose is optional because the relay and publisher cover
-delivery and batching. The outbox supplies the initial persistent buffer; add
-SQS or Kinesis only when scale, isolation, replay, or additional consumers justify
-another component.
+The two proposals above retain Firehose for managed batching and delivery.
+Fluent Bit remains useful for ordinary operational logs, but is not the
+authoritative acceptance boundary for either audit path. The outbox relay could
+instead write directly to S3, taking ownership of batching and upload recovery;
+Firehose is not mandatory. Add SQS or Kinesis only when scale, isolation, replay,
+or additional consumers justify another component.
 
 Keep implementation slices separate: first validate Security Lake publication
 using sanitized fixtures or existing archived events, then implement and
