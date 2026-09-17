@@ -1,26 +1,8 @@
-# SRE exercise: platform and investigation guide
+# Platform architecture and observability
 
-You are investigating a synthetic incident in a movie-booking application.
-Explain user impact, follow evidence across dependencies, propose a safe mitigation
-and describe how to verify recovery. You do not need to guess a hidden trick or
-rebuild the environment.
-
-**Access is investigation-only.** Use your own assigned identity for Grafana and
-scoped AWS inspection. Public source needs no repository membership. The
-facilitator performs approved changes; do not deploy, restart tasks, alter IAM,
-retrieve secrets, run ECS Exec or delete resources.
-
-Before starting, obtain from the facilitator:
-
-- The application, dashboard, alert and Explore links, plus permitted AWS console
-  entry points. Live addresses are intentionally not published here.
-- The selected service revisions/image digests and infrastructure revision.
-- The incident time window, expected user journey and time budget.
-- Confirmation of available data sources and any instrumentation/access gaps.
-
-This is an architecture guide, **not evidence of what is running now**. Source
-references below are inspected baselines; the demonstrated release takes
-precedence. Report missing access or telemetry rather than working around it.
+This document describes the demo topology, service boundaries and signal paths.
+Pinned source links identify inspected baselines; the selected deployment revision
+is authoritative for runtime behavior.
 
 ## 1. Request flow and deployment boundary
 
@@ -69,7 +51,7 @@ the user workflow and do not prove successful booking.
 ## 2. Signals, storage and investigation tools
 
 Solid arrows show baseline routing. Dashed arrows identify the optional Tempo
-addition, which the facilitator must confirm is deployed and working.
+addition, which requires separate deployment and runtime verification.
 
 ```mermaid
 flowchart LR
@@ -91,7 +73,7 @@ flowchart LR
         Tempo["Tempo: ephemeral trace storage"]
     end
     ADOT -.->|"Second trace export"| Tempo
-    Investigator["Investigator browser"] --> AMG["Amazon Managed Grafana"]
+    Investigator["Grafana browser"] --> AMG["Amazon Managed Grafana"]
     AMG -->|"PromQL metrics and alert evaluation"| AMP
     AMG -->|"Logs Insights and metrics"| CW
     AMG -->|"Fallback trace queries"| XRay
@@ -103,11 +85,11 @@ flowchart LR
 | Metrics | AMP PromQL in Managed Grafana | Scope to the supplied environment/service/route; a metric alert identifies a time window, not one trace. |
 | Traces | Tempo when confirmed available; X-Ray otherwise | Not every component/hop is instrumented. Missing spans are not proof a dependency was never called. |
 | Operational logs | CloudWatch Logs Insights, including through Grafana | Trace/log navigation is manual in this version; some events have only request/correlation IDs. |
-| Audit events | Separate Firehose → S3 → Glue/Athena path, if included in your authorized exercise | This custom audit archive is **not Amazon Security Lake**, and is not the main incident-debugging log stream. |
-| Alert state | Grafana alert rules and dashboard context | The rehearsal may intentionally suppress notifications while showing real evaluation; a visible alert need not send a chat/page. |
+| Audit events | Separate Firehose → S3 → Glue/Athena path, when enabled and authorized | This custom audit archive is **not Amazon Security Lake**, and is not the main incident-debugging log stream. |
+| Alert state | Grafana alert rules and dashboard context | Rule evaluation and notification delivery are separate; verify both when configuring alerts. |
 
 AMP remains the metrics backend. Mimir, Loki and browser RUM/Faro are not part of
-this exercise baseline. Adding Tempo does not automatically add native Loki-style
+this architecture baseline. Adding Tempo does not automatically add native Loki-style
 trace-to-log navigation. The proposed Tempo service is separate from the app task,
 but uses ephemeral task storage: replacing/stopping it loses its trace history.
 Existing X-Ray export is retained as a fallback. Neither tracing nor stdout
@@ -116,13 +98,12 @@ collection should be interpreted as a durable transactional audit guarantee.
 Tempo connectivity and the small symptom dashboard are separate reviewed changes:
 [Tempo infrastructure PR #56](https://github.com/movie-reservation-platform-lab/movie-platform-infra/pull/56)
 and [Grafana alert/dashboard PR #55](https://github.com/movie-reservation-platform-lab/movie-platform-infra/pull/55).
-Their existence is not a claim that the capabilities are live in your session.
+Their existence is not proof of a particular live deployment.
 
 ## 3. Public source map
 
 These are public, read-only entrypoints inspected for this guide. The pinned
-links make the reference stable; ask the facilitator for the corresponding
-paths at the **demonstrated revision** when it differs.
+links make the reference stable; use the corresponding paths at the selected deployment revision when it differs.
 
 | Repository | Start reading here | Purpose |
 | --- | --- | --- |
@@ -134,36 +115,7 @@ paths at the **demonstrated revision** when it differs.
 | [movie-reservation-service](https://github.com/movie-reservation-platform-lab/movie-reservation-service) | [GraphQL presentation](https://github.com/movie-reservation-platform-lab/movie-reservation-service/tree/722909fcfc5f80c5b29c425c1eb3c30883a51e51/src/presentation/graphql), [Observability](https://github.com/movie-reservation-platform-lab/movie-reservation-service/tree/722909fcfc5f80c5b29c425c1eb3c30883a51e51/src/infrastructure/observability) | Booking/availability boundaries and server-side signals. |
 | [movie-platform-infra](https://github.com/movie-reservation-platform-lab/movie-platform-infra) | [Task composition](https://github.com/movie-reservation-platform-lab/movie-platform-infra/blob/51b38cc21eb58c8468d0ea5f30769e6b571a56ce/lib/infra-stack.ts), [Collector](https://github.com/movie-reservation-platform-lab/movie-platform-infra/blob/51b38cc21eb58c8468d0ea5f30769e6b571a56ce/adot-collector/adot-config.yaml), [Audit router](https://github.com/movie-reservation-platform-lab/movie-platform-infra/tree/51b38cc21eb58c8468d0ea5f30769e6b571a56ce/audit-router) | Actual deployment ownership, telemetry destinations and audit/log separation. |
 
-No access to private delivery-control repositories is required. The facilitator
-provides sanitized release facts instead of granting access to deployment secrets
-or private admission evidence.
-
-## 4. Investigation workflow
-
-1. **Establish impact and time.** Record the alert, time window and environment.
-   Compare the affected user journey with one that still works. Ask for a bounded
-   reproduction; do not generate unbounded traffic or repeated bookings.
-2. **Check signal quality.** Compare request volume, error status and latency.
-   Confirm samples are fresh. A NoData/Error state is a telemetry problem to
-   investigate, not evidence that the application recovered.
-3. **Follow one request.** Compare a failing trace with a successful trace in the
-   same window. Follow dependency boundaries and actual status/duration evidence.
-   Use the real trace ID to search logs; use request/correlation IDs when trace
-   context is unavailable. Tempo's 32-hex trace ID and X-Ray's formatted ID are
-   different representations—do not paste a fabricated or truncated identifier.
-4. **Test a hypothesis safely.** Inspect relevant source and permitted ECS/ALB
-   state. Explain supporting and contradictory evidence before proposing a
-   mitigation. Do not equate a green health check with a healthy user operation.
-5. **Recommend and verify.** State the smallest reversible action, its risk and
-   expected result. The facilitator executes an agreed change. Verify successful
-   user behavior, fresh signals and alert recovery after its lookback window clears.
-
-Finish with a short timeline, impact statement, likely failure boundary,
-confidence level, mitigation proposal and one follow-up improvement. State what
-you could not establish; a careful investigation is more useful than certainty
-unsupported by evidence.
-
-The [service symptom investigation runbook](https://github.com/movie-reservation-platform-lab/movie-platform-infra/blob/a576644128707ef2caf01bcb8b5dd32d38ee37f8/docs/operations/sre-investigation.md)
-is supplied by the alert/dashboard change. It contains no operator trigger/reset
-instructions. The facilitator should pin both this guide and that runbook to the
-reviewed revisions used for the session.
+Application repositories publish immutable artifacts and evidence. Environment
+control selects exact identities, governs ECR admission, and reviews deployment.
+Registry admission is separate from deployment; architecture documentation alone
+is not evidence that a particular release or optional backend is running.

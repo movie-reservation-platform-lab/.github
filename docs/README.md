@@ -1,6 +1,7 @@
 # Platform documentation
 
-- [SRE interview: architecture and investigation guide](sre-interview/README.md)
+- [Platform architecture and observability](architecture/README.md)
 
-The interview guide describes the demo composition and its limitations. The
-facilitator supplies the exact deployed release and access links for each session.
+The architecture guide describes service ownership, request routing, telemetry
+stores and deployment limitations. Verify runtime behavior against the selected
+release rather than treating documentation as live-state evidence.
